@@ -1,0 +1,4 @@
+# ninja log v7
+2	36	8002048254422326	CMakeFiles/main.dir/src/main.cpp.obj	b0fa4a894f300e4c
+5	37	8002048254454227	CMakeFiles/main.dir/src/Connection.cpp.obj	214eed45e9a8ef86
+8	38	8002048254474223	CMakeFiles/main.dir/src/ConnectionPool.cpp.obj	b06c5bbabc1d4410
