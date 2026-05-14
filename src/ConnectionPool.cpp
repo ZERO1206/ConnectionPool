@@ -2,6 +2,7 @@
 #include "public.h"
 #include <chrono>
 #include <thread>
+#include <functional>
 #include <fstream>
 
 ConnectionPool* ConnectionPool::getConnectionPool() {
@@ -23,9 +24,18 @@ ConnectionPool::ConnectionPool() {
 
     // 启动生产者线程
     std::thread produce(std::bind(&ConnectionPool::produceConnectionTask, this));
+    /*
+    std::thread produce([this]() { 
+        this->produceConnectionTask(); 
+    });
+    */
+
+    // 启动空间连接清理线程
+    std::thread scanner(std::bind(&ConnectionPool::scannerConnectionTask, this));
 
     // 设置线程分离
     produce.detach();
+    scanner.detach();
 }
 
 bool ConnectionPool::loadConfigFile() {
@@ -66,8 +76,8 @@ void ConnectionPool::addConnection() {
     if(p->connect(_ip, _port, _user, _password, _dbname)) {
         // 更新连接的进入队列时间戳（用于后续空闲回收） 
         p->refreshAliveTime();
-        _connectionQue.push(p);  // 将连接放入队列
-        _connectionCnt++;
+        _connectionQue.push(p);  // 修改了共享队列
+        _connectionCnt++;  // 修改了共享计数器
     }
     else {
         delete p;  // 连接失败销毁
@@ -80,18 +90,23 @@ std::shared_ptr<Connection> ConnectionPool::getConnection() {
 
     // 检查队列是否为空
     while(_connectionQue.empty()) {
-        cv.wait_for(lock, std::chrono::milliseconds(_connectionTimeout));
-        if(_connectionQue.empty()) {
-            return nullptr;
+        // 通知生产者线程
+        _cv.notify_all();
+
+        if(std::cv_status::timeout == _cv.wait_for(lock, std::chrono::milliseconds(_connectionTimeout))) {
+            if(_connectionQue.empty()) {
+                LOG("Connection Pool: Get connection timeout, failed!");
+                throw std::runtime_error("Get connection timeout from pool");
+            }
         }
     }
 
     std::shared_ptr<Connection> sp(_connectionQue.front(), 
-        [&](Connection *pcon) {
+        [this](Connection *pcon) {
             std::unique_lock<std::mutex> lock(_queueMutex);
             pcon->refreshAliveTime(); // 归还前刷新空闲起始时间
             _connectionQue.push(pcon); // 重新放回池子
-            cv.notify_all(); // 通知有连接可用了
+            _cv.notify_all(); // 通知有连接可用了
         });
     
     _connectionQue.pop();
@@ -105,7 +120,7 @@ void ConnectionPool::produceConnectionTask() {
 
         while (!_connectionQue.empty())
         {
-            cv.wait(lock);
+            _cv.wait(lock);
         }
 
         if (_connectionCnt < _maxSize)
@@ -113,6 +128,28 @@ void ConnectionPool::produceConnectionTask() {
             addConnection();
         }
 
-        cv.notify_all();
+        _cv.notify_all();
+    }
+}
+
+void ConnectionPool::scannerConnectionTask() {
+    while(true) {
+        // 定时执行scanner线程
+        std::this_thread::sleep_for(std::chrono::seconds(_maxIdleTime));
+
+        std::unique_lock<std::mutex> lock(_queueMutex);
+        // 检查条件
+        // 1、当前连接总数 _connectionCnt > _initSize
+        while(_connectionCnt > _initSize && !_connectionQue.empty()) {
+            Connection* p = _connectionQue.front();
+            // 获取连接的空闲时长
+            if (p->getAliveTime() >= (_maxIdleTime * 1000)) {
+                _connectionQue.pop();
+                _connectionCnt--;
+                delete p; // 调用析构函数 关闭数据库连接 (mysql_close)
+            } else {
+                break;
+            }
+        }
     }
 }

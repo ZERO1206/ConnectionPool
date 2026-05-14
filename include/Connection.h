@@ -6,17 +6,25 @@
 class Connection {
 public:
     Connection();
+
+    Connection(const Connection&) = delete;
+
+    Connection& operator=(const Connection&) = delete;
+
     ~Connection();
 
     // 建立连接
-    bool connect(std::string ip, unsigned short port, 
-        std::string user, std::string password, std::string dbname);
+    bool connect(const std::string& ip, 
+                const unsigned short& port, 
+                const std::string& user,
+                const std::string& password, 
+                const std::string& dbname);
 
     // 更新操作
-    bool update(std::string sql);
+    bool update(const std::string& sql);
 
     // 查询操作
-    MYSQL_RES* query(std::string sql);
+    MYSQL_RES* query(const std::string& sql);
 
     // 刷新连接开始空闲的时间点
     void refreshAliveTime();
