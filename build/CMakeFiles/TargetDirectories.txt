@@ -1,3 +1,0 @@
-D:/Visual Studio C++/ConnectionPool/build/CMakeFiles/main.dir
-D:/Visual Studio C++/ConnectionPool/build/CMakeFiles/edit_cache.dir
-D:/Visual Studio C++/ConnectionPool/build/CMakeFiles/rebuild_cache.dir
