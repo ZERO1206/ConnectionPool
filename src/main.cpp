@@ -11,7 +11,6 @@ void insertTask(int begin, int end)
 
     for (int i = begin; i <= end; ++i)
     {
-        // 从连接池获取连接
         shared_ptr<Connection> sp = pool->getConnection();
 
         char sql[1024] = {0};
@@ -20,7 +19,6 @@ void insertTask(int begin, int end)
                 "insert into user(name, age) values('zhangsan%d', %d)",
                 i, i);
 
-        // 执行插入
         if (sp->update(sql))
         {
             cout << "thread "
@@ -40,7 +38,6 @@ int main()
 {
     vector<thread> threads;
 
-    // 启动4个线程
     for (int i = 0; i < 4; ++i)
     {
         threads.emplace_back(
@@ -49,7 +46,6 @@ int main()
             (i + 1) * 50);
     }
 
-    // 回收线程
     for (auto& t : threads)
     {
         t.join();
@@ -57,9 +53,7 @@ int main()
 
     cout << "all insert finished!" << endl;
 
-    // 等待scanner回收连接
-    this_thread::sleep_for(
-        chrono::seconds(20));
+    this_thread::sleep_for(chrono::seconds(20));
 
     return 0;
 }

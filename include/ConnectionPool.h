@@ -10,7 +10,7 @@ class ConnectionPool {
 public:
     // 获取单例
     static ConnectionPool* getConnectionPool();
-s
+
     // 获取一个可用的数据库连接
     std::shared_ptr<Connection> getConnection();
 
