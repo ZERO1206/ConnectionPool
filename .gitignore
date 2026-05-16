@@ -1,0 +1,10 @@
+# 忽略 CMake 编译目录（里面全是编译垃圾、exe和dll）
+build/
+.cache/
+
+# 忽略 VS Code 自身的本地配置
+.vscode/
+
+# 忽略本地数据库配置文件（保护你的密码安全）
+*.ini
+*.txt
