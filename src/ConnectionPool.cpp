@@ -74,6 +74,8 @@ void ConnectionPool::addConnection() {
     Connection* p = new Connection();  // 创建连接对象
 
     if(p->connect(_ip, _port, _user, _password, _dbname)) {
+        LOG("mysql connection success!");
+        
         // 更新连接的进入队列时间戳（用于后续空闲回收） 
         p->refreshAliveTime();
         _connectionQue.push(p);  // 修改了共享队列

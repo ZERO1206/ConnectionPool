@@ -25,7 +25,12 @@ bool Connection::connect(const std::string& ip,
     // 尝试连接数据库
     MYSQL *p = mysql_real_connect(_conn, ip.c_str(), user.c_str(), 
                                   password.c_str(), dbname.c_str(), port, nullptr, 0);
-    return p != nullptr;
+    if(p == nullptr) {
+        std::cout << "mysql_real_connect failed: " << mysql_error(_conn) << std::endl;
+        return false;
+    }
+
+    return true;
 }
 bool Connection::update(const std::string& sql) {
     // 执行SQL增删改
