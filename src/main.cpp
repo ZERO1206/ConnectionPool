@@ -3,15 +3,13 @@
 #include <iostream>
 #include <vector>
 
-using namespace std;
-
 void insertTask(int begin, int end)
 {
     ConnectionPool* pool = ConnectionPool::getConnectionPool();
 
     for (int i = begin; i <= end; ++i)
     {
-        shared_ptr<Connection> sp = pool->getConnection();
+        std::shared_ptr<Connection> sp = pool->getConnection();
 
         char sql[1024] = {0};
 
@@ -21,22 +19,22 @@ void insertTask(int begin, int end)
 
         if (sp->update(sql))
         {
-            cout << "thread "
-                 << this_thread::get_id()
+            std::cout << "thread "
+                 << std::this_thread::get_id()
                  << " insert success: "
-                 << i << endl;
+                 << i << std::endl;
         }
         else
         {
-            cout << "insert failed: "
-                 << i << endl;
+            std::cout << "insert failed: "
+                 << i << std::endl;
         }
     }
 }
 
 int main()
 {
-    vector<thread> threads;
+    std::vector<std::thread> threads;
 
     for (int i = 0; i < 4; ++i)
     {
@@ -51,9 +49,9 @@ int main()
         t.join();
     }
 
-    cout << "all insert finished!" << endl;
+    std::cout << "all insert finished!" << std::endl;
 
-    this_thread::sleep_for(chrono::seconds(20));
+    std::this_thread::sleep_for(std::chrono::seconds(20));
 
     return 0;
 }
