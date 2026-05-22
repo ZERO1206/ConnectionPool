@@ -45,6 +45,10 @@ MYSQL_RES* Connection::query(const std::string& sql) {
     return mysql_store_result(_conn);
 }
 
+bool Connection::isAlive() {
+    return mysql_ping(_conn) == 0;
+}
+
 void Connection::refreshAliveTime() {
     _alivetime = std::chrono::steady_clock::now();
 }

@@ -26,6 +26,9 @@ public:
     // 查询操作
     MYSQL_RES* query(const std::string& sql);
 
+    // 检测连接是否存活
+    bool isAlive();
+
     // 刷新连接开始空闲的时间点
     void refreshAliveTime();
 
