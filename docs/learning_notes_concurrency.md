@@ -1,4 +1,4 @@
-# MySQL C API 与 chrono 时间库学习笔记
+# C++ 连接池核心知识点学习笔记
 
 ## 一、MySQL C API
 
@@ -214,3 +214,177 @@ auto ms = std::chrono::duration_cast<                  // ③ 换算
 | **空闲超时回收** | `_alivetime` 记录归还时刻；`getAliveTime()` 计算 (now - _alivetime) 毫秒数，与 `maxIdleTime * 1000` 比较 |
 | **借用超时控制** | `wait_for` 传入 `std::chrono::milliseconds(_connectionTimeout)` |
 | **等待耗时监控** | `wait_for` 前后各记录 `steady_clock::now()`，差值累加到 `_totalWaitMs` |
+
+---
+
+## 三、C++ 文件读取 — fstream
+
+### 1. 头文件
+
+```cpp
+#include <fstream>   // std::ifstream
+#include <string>    // std::string, std::getline, std::stoi
+```
+
+---
+
+### 2. 打开文件 — ifstream
+
+```cpp
+std::ifstream ifs("mysql.ini");
+```
+
+| 项目 | 说明 |
+|------|------|
+| `std::ifstream` | Input File Stream — 只读文件流对象 |
+| **构造参数** | 文件路径（相对路径相对于程序运行目录） |
+| `ifs.is_open()` | 返回 `bool`，文件是否成功打开 |
+| **文件不存在** | `is_open()` 返回 `false`，不会崩溃 |
+
+**标准打开检查**：
+
+```cpp
+std::ifstream ifs("mysql.ini");
+if (!ifs.is_open()) {
+    return false;  // 文件不存在或无法打开
+}
+```
+
+---
+
+### 3. 逐行读取 — std::getline
+
+```cpp
+std::string line;
+while (std::getline(ifs, line)) {
+    // 每次循环，line 存储文件的下一行
+}
+```
+
+| 项目 | 说明 |
+|------|------|
+| **参数 1** | 文件流对象（`std::ifstream&`） |
+| **参数 2** | `std::string&`，读到的行内容存入此变量（每次覆盖） |
+| **返回值** | 流对象引用；读到文件末尾（EOF）自动转为 `false`，退出循环 |
+
+**执行过程**：文件有 10 行 → 循环 10 次，每次 `line` 存一行。
+
+---
+
+### 4. 字符串查找 — find
+
+```cpp
+std::string line = "port=3306";
+size_t idx = line.find('=');  // idx = 4
+```
+
+| 项目 | 说明 |
+|------|------|
+| **参数** | 要查找的字符 |
+| **返回值** | `size_t`。找到返回位置（0-based，从 0 开始计数）；找不到返回 `std::string::npos` |
+
+**应对非 key=value 行**（空行、注释）：
+
+```cpp
+if (idx == std::string::npos) {
+    continue;  // 跳过本行
+}
+```
+
+---
+
+### 5. 字符串截取 — substr
+
+```cpp
+std::string line = "port=3306";
+size_t idx = line.find('=');       // idx = 4
+
+std::string key = line.substr(0, idx);     // "port"
+std::string val = line.substr(idx + 1);    // "3306"
+```
+
+**可视化**：
+
+```
+"port=3306"
+ 012345678
+   ↑ idx=4
+
+key = substr(0, 4)    → "port"   (位置 0 开始，取 4 个字符)
+val = substr(5)       → "3306"   (位置 5 开始，取到末尾)
+```
+
+---
+
+### 6. 字符串转整数 — std::stoi 与安全包装
+
+`std::stoi` 极脆弱：传入 `"abc"` 直接抛异常。
+
+**项目所用的安全包装 `parseInt`**：
+
+```cpp
+static bool parseInt(const std::string& s, int& out) {
+    try {
+        size_t pos;
+        out = std::stoi(s, &pos);      // &pos 记录解析停止位置
+        return pos == s.size();        // 全部字符消费完毕 → 合法整数
+    } catch (...) {
+        return false;                  // 转换异常 → 非法
+    }
+}
+```
+
+| 调用 | `std::stoi` 裸调 | `parseInt` 包装 |
+|------|-----------------|----------------|
+| `"3306"` | 成功 | 成功（pos 走到末尾） |
+| `"abc"` | **崩溃** | `false` |
+| `"100abc"` | 成功（只读前 3 字）| `false`（pos 未到末尾） |
+
+---
+
+### 7. 完整解析套路
+
+```cpp
+bool ConnectionPool::loadConfigFile() {
+    std::ifstream ifs("mysql.ini");
+    if (!ifs.is_open()) {
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(ifs, line)) {
+        size_t idx = line.find('=');
+        if (idx == std::string::npos) continue;
+
+        std::string key = line.substr(0, idx);
+        std::string val = line.substr(idx + 1);
+
+        // 字符串类型配置
+        if (key == "ip") _ip = val;
+        else if (key == "port") {
+            int tmp;
+            if (!parseInt(val, tmp)) {
+                LOG("Invalid port: " + val);
+                return false;  // 硬错误
+            }
+            _port = static_cast<unsigned short>(tmp);
+        }
+        // ... 以此类推
+    }
+
+    // 末尾校验块（硬错误 + 软纠正）
+    return true;
+}
+```
+
+---
+
+### 8. 涉及的 C++ 类型速查
+
+| 类型 | 头文件 | 用途 |
+|------|--------|------|
+| `std::ifstream` | `<fstream>` | 文件读取流 |
+| `std::string` | `<string>` | 字符串（key/value 存储） |
+| `std::getline` | `<string>` | 从流中读取一行到 string |
+| `std::stoi` | `<string>` | string → int（需 try-catch 保护） |
+| `std::stod` | `<string>` | string → double |
