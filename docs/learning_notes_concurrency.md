@@ -391,15 +391,82 @@ bool ConnectionPool::loadConfigFile() {
 
 ---
 
-## 四、多线程同步 — mutex, lock, condition_variable, atomic
+## 四、多线程同步 — thread, mutex, lock, condition_variable, atomic
 
-### 1. 核心问题：为什么需要同步
+### 1. std::thread — 创建线程
 
-多个线程同时访问 `_connectionQue`（`std::queue`）会发生数据竞争（data race），导致崩溃或数据错乱。必须保证**同一时刻只有一个线程操作队列**。
+```cpp
+#include <thread>
+```
+
+| 项目 | 说明 |
+|------|------|
+| **本质** | 代表一个操作系统线程的句柄 |
+| **构造** | `std::thread t(可调用对象, 参数...)` — 构造即启动线程 |
+| **线程函数** | 可以是普通函数、成员函数、lambda |
+| 线程结束后 | 线程函数 return 时线程自然结束 |
+
+#### 启动普通函数
+
+```cpp
+void worker() { /* ... */ }
+std::thread t(worker);     // 启动线程，执行 worker()
+t.detach();                // 分离：线程独立运行，t 不再管它
+```
+
+#### 启动成员函数（本项目用法）
+
+```cpp
+std::thread t(&ConnectionPool::produceConnectionTask, this);
+t.detach();
+```
+
+| 参数 | 含义 |
+|------|------|
+| `&ConnectionPool::produceConnectionTask` | 成员函数地址 |
+| `this` | 绑定的对象指针 |
+
+**为什么不能直接写 `produceConnectionTask`？** 非静态成员函数有一个隐式的 `this` 参数，编译器必须知道绑到哪个对象。写成 `std::thread t(produceConnectionTask)` 语法不对——编译器找不到这个自由函数。
+
+#### 或者用 lambda（更直观）
+
+```cpp
+std::thread t([this]() { this->produceConnectionTask(); });
+t.detach();
+```
+
+#### detach vs join
+
+| 操作 | 效果 | 使用场景 |
+|------|------|---------|
+| `t.detach()` | 线程与 t 对象脱钩，独立运行到结束 | 后台守护线程（本项目） |
+| `t.join()` | 阻塞等待线程结束 | 需要等待结果再继续 |
+
+**本项目全部用 detach**：生产者、扫描者都是后台永久运行的守护线程，没人等它们结束。
 
 ---
 
-### 2. std::mutex — 互斥锁
+### 2. std::this_thread::sleep_for — 线程休眠
+
+```cpp
+#include <thread>
+#include <chrono>
+
+std::this_thread::sleep_for(std::chrono::seconds(60));     // 睡 60 秒
+std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 睡 100 毫秒
+```
+
+| 项目 | 说明 |
+|------|------|
+| **作用** | 让当前线程挂起指定时长 |
+| **需要锁吗** | **不需要**，线程直接休眠，不持有任何资源 |
+| **与条件变量 wait 的区别** | `sleep_for` 纯时间驱动，不会被 notify 唤醒；`cv.wait_for` 可被 notify 提前唤醒 |
+
+**本项目应用**：`scannerConnectionTask()` 用 `sleep_for` 定期清理——睡 `maxIdleTime` 秒后醒来扫描一圈，然后继续睡。无需条件变量通知。
+
+---
+
+### 3. std::mutex — 互斥锁
 
 ```cpp
 #include <mutex>
@@ -418,7 +485,7 @@ std::mutex _queueMutex;
 
 ---
 
-### 3. std::lock_guard — RAII 自动锁（轻量级）
+### 4. std::lock_guard — RAII 自动锁（轻量级）
 
 ```cpp
 {
@@ -441,7 +508,7 @@ std::mutex _queueMutex;
 
 ---
 
-### 4. std::unique_lock — 灵活锁（配合条件变量）
+### 5. std::unique_lock — 灵活锁（配合条件变量）
 
 ```cpp
 std::unique_lock<std::mutex> lock(_queueMutex);
@@ -462,7 +529,7 @@ std::unique_lock<std::mutex> lock(_queueMutex);
 
 ---
 
-### 5. std::condition_variable — 条件变量（线程间通知）
+### 6. std::condition_variable — 条件变量（线程间通知）
 
 这把锁的脑子。光有 mutex 不够——消费者看到队列空时不能一直空转（浪费 CPU），需要"睡"着等，等有人放了连接进来"叫醒"。
 
@@ -504,7 +571,7 @@ while (_connectionQue.empty()) {
 
 ---
 
-### 6. std::atomic — 无锁原子变量
+### 7. std::atomic — 无锁原子变量
 
 ```cpp
 #include <atomic>
@@ -527,7 +594,7 @@ std::atomic_long _totalBorrows{0};
 
 ---
 
-### 7. 项目同步全景图
+### 8. 项目同步全景图
 
 ```
 共享资源：_connectionQue (queue)、_connectionCnt (atomic)
@@ -560,7 +627,7 @@ std::atomic_long _totalBorrows{0};
 
 ---
 
-### 8. 关键原则总结
+### 9. 关键原则总结
 
 | 原则 | 原因 |
 |------|------|
