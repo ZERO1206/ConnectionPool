@@ -2,47 +2,49 @@
 
 ## 总览：一条连接从池子到调用者的完整旅程
 
-```
-调用者                        ConnectionPool                     MySQL 服务端
-  │                                │                                  │
-  │  auto conn = pool->getConnection()                                │
-  │ ──────────────────────────────→                                  │
-  │                                │                                  │
-  │                           ① 加锁                                  │
-  │                           ② _waitingThreads++                    │
-  │                                │                                  │
-  │                         队列空？──是──→ ③ notify_all() 叫生产者   │
-  │                                │                                  │
-  │                         ④ wait_for(timeout)                      │
-  │                           释放锁 + 睡觉...                        │
-  │                                │          ←── ⑤ notify_all() ── 生产者创建了新连接
-  │                                │          ←── 或── notify_all() ── 调用者归还了连接
-  │                                │          ←── 或── 超时自己醒 ── 时间到了没人叫
-  │                                │                                  │
-  │                           ⑥ 重新拿锁                              │
-  │                         被叫醒？→ 继续                            │
-  │                         超时？──→ ⑦ 检查队列真的空？→ 抛异常     │
-  │                                │                                  │
-  │                         队头出列                                  │
-  │                           ⑧ isAlive()? ──死了──→ ⑨ pop+delete+continue
-  │                                │                                  │
-  │                           活了！                                  │
-  │                         ⑩ _totalBorrows++                        │
-  │                         ⑪ 包成 shared_ptr(自定义删除器)          │
-  │                         ⑫ 从队列 pop                             │
-  │                         ⑬ return sp ──────────────→              │
-  │                                │                                  │
-  │  conn->query("SELECT ...") ───────────────────────────────────→ 发送查询
-  │                              ←─────────────────────────────────   返回结果
-  │                                │                                  │
-  │  conn 离开作用域                                                │
-  │  shared_ptr 析构                                                │
-  │     ↓                                                             │
-  │  ⑭ 自定义删除器执行                                                │
-  │     ├── isAlive()?                                                │
-  │     │   ├── 活着 → 放回队列 + notify_all                          │
-  │     │   └── 死了 → delete                                         │
-  │                                │                                  │
+```mermaid
+sequenceDiagram
+    participant C as 调用者
+    participant P as ConnectionPool
+    participant M as MySQL
+
+    C->>P: getConnection()
+    P->>P: ① 加锁
+    P->>P: ② _waitingThreads++
+
+    alt 队列为空
+        P->>P: ③ notify_all() 唤醒生产者
+        P->>P: ④ wait_for(timeout) 释放锁+睡觉
+        Note over P: ... 等待中 ...
+        alt 被 notify 叫醒
+            P->>P: ⑤ 重新拿锁
+        else 超时
+            P->>P: ⑦ 队列真的空 → throw exception
+        end
+    end
+
+    P->>M: ⑧ mysql_ping()
+    alt 连接已死
+        M-->>P: 非0
+        P->>P: ⑨ pop + delete + continue (重取)
+    else 连接存活
+        M-->>P: 0
+        P->>P: ⑩ _totalBorrows++
+        P->>P: ⑪ 包装 shared_ptr (自定义删除器)
+        P->>P: ⑫ pop 出队
+        P-->>C: ⑬ return shared_ptr
+
+        C->>M: conn->query("SELECT ...")
+        M-->>C: 结果
+
+        Note over C: shared_ptr 离开作用域
+        P->>M: ⑭ 自定义删除器: mysql_ping()
+        alt 归还时连接存活
+            P->>P: 放回队列 + notify_all()
+        else 归还时连接已死
+            P->>P: delete
+        end
+    end
 ```
 
 ---
@@ -426,33 +428,35 @@ try {
 
 ## 线程交互全景
 
-```
-        消费者 A                   生产者                  消费者 B
-          │                        │                        │
-          │ getConnection()        │                        │
-          │ lock()                 │                        │
-          │ 队列空 wait_for()      │                        │
-          │   释放锁+睡觉          │                        │
-          │                   ← notify_all()                │
-          │                    lock()                       │
-          │                    队列空 addConnection()        │
-          │                    push+notify_all()             │
-          │                    unlock()                     │
-          │ 醒来+拿锁              │                        │
-          │ 队列非空!              │                        │
-          │ 取队头 ping            │                        │
-          │ 活了!                  │                        │
-          │ pop 出队               │                        │
-          │ unlock()               │                        │
-          │                        │                        │ getConnection()
-          │  用连接...             │                        │ wait_for(队列空)
-          │                        │                        │
-          │ shared_ptr 析构        │                        │
-          │ lock()                 │                        │
-          │ push 归还              │                        │
-          │ notify_all() ──────────┼──────→ 醒来+拿锁      │
-          │ unlock()               │        队列非空!       │
-          │                        │        取队头...       │
+```mermaid
+sequenceDiagram
+    participant A as 消费者A
+    participant Prod as 生产者
+    participant B as 消费者B
+
+    A->>A: getConnection() + lock()
+    Note over A: 队列空 → wait_for() 睡觉
+
+    Prod->>Prod: notify_all() 叫醒
+    Prod->>Prod: lock()
+    Prod->>Prod: 队列空 → addConnection()
+    Prod->>Prod: push + notify_all()
+    Prod->>Prod: unlock()
+
+    A->>A: 醒来 + 拿锁
+    A->>A: 队列非空 → 取队头 → ping
+    A->>A: 活了 → pop → unlock()
+
+    B->>B: getConnection() lock()
+    Note over B: 队列空 → wait_for() 睡觉
+
+    A->>A: 用连接...
+    A->>A: shared_ptr 析构 → lock()
+    A->>A: push 归还 + notify_all()
+    A->>A: unlock()
+
+    B->>B: 醒来 + 拿锁
+    B->>B: 队列非空 → 取队头...
 ```
 
 ---
