@@ -388,3 +388,187 @@ bool ConnectionPool::loadConfigFile() {
 | `std::getline` | `<string>` | 从流中读取一行到 string |
 | `std::stoi` | `<string>` | string → int（需 try-catch 保护） |
 | `std::stod` | `<string>` | string → double |
+
+---
+
+## 四、多线程同步 — mutex, lock, condition_variable, atomic
+
+### 1. 核心问题：为什么需要同步
+
+多个线程同时访问 `_connectionQue`（`std::queue`）会发生数据竞争（data race），导致崩溃或数据错乱。必须保证**同一时刻只有一个线程操作队列**。
+
+---
+
+### 2. std::mutex — 互斥锁
+
+```cpp
+#include <mutex>
+
+std::mutex _queueMutex;
+```
+
+| 项目 | 说明 |
+|------|------|
+| **本质** | 一把"门锁"，同一时刻只有一个线程能持有 |
+| `_queueMutex.lock()` | 拿锁——别人拿着就阻塞等待 |
+| `_queueMutex.unlock()` | 放锁——下一个等待的线程拿到 |
+| **手动 lock/unlock 的风险** | 中间抛异常 → unlock 永远执行不到 → 死锁 |
+
+**比喻**：一个厕所坑位，进门锁门（lock），出来开锁（unlock）。忘记开锁后面的人永远进不去。
+
+---
+
+### 3. std::lock_guard — RAII 自动锁（轻量级）
+
+```cpp
+{
+    std::lock_guard<std::mutex> lock(_queueMutex);
+    // 构造时自动 lock()
+    stats.idleConnections = _connectionQue.size();
+    // 离开作用域自动 unlock()
+}
+```
+
+| 项目 | 说明 |
+|------|------|
+| **构造时** | 自动 `lock()` |
+| **析构时** | 自动 `unlock()`，无论如何离开作用域都执行 |
+| **适用场景** | 简单的"加锁-干活-解锁"，不需要中途解锁 |
+| **不可手动 unlock** | lock_guard 没有 `unlock()` 方法 |
+| **不可拷贝** | 不能赋值/传参 |
+
+**项目应用**：`getStats()` 中读 `queue.size()` 用了 lock_guard。
+
+---
+
+### 4. std::unique_lock — 灵活锁（配合条件变量）
+
+```cpp
+std::unique_lock<std::mutex> lock(_queueMutex);
+// 可以随时 unlock() 再 lock()
+// 配合条件变量必须用 unique_lock
+```
+
+| 对比 | lock_guard | unique_lock |
+|------|-----------|-------------|
+| **自动加锁** | ✅ | ✅ |
+| **自动解锁** | ✅ | ✅ |
+| **手动 unlock()** | ❌ | ✅ |
+| **配合条件变量** | ❌ 不行 | ✅ 必须 |
+| **性能开销** | 极小 | 稍大（多了状态标志） |
+| **适用场景** | 简单临界区 | 需要 wait/notify 或中途解锁 |
+
+**项目应用**：`getConnection()`、`produceConnectionTask()`、`scannerConnectionTask()` 全部用 unique_lock，因为需要配合 `condition_variable`。
+
+---
+
+### 5. std::condition_variable — 条件变量（线程间通知）
+
+这把锁的脑子。光有 mutex 不够——消费者看到队列空时不能一直空转（浪费 CPU），需要"睡"着等，等有人放了连接进来"叫醒"。
+
+```cpp
+#include <condition_variable>
+
+std::condition_variable _cv;
+```
+
+#### 核心操作
+
+| 操作 | 作用 | 前提 |
+|------|------|------|
+| `_cv.wait(lock)` | **"我睡了，有货叫我"**。释放锁→阻塞→被唤醒→重新拿锁→继续 | 必须持有锁 |
+| `_cv.wait_for(lock, 时长)` | 同上，但最多等一段时间，超时自动醒来 | 必须持有锁 |
+| `_cv.notify_one()` | **"醒一个"**。唤醒一个等待线程 | 可持锁可不持 |
+| `_cv.notify_all()` | **"全醒"**。唤醒所有等待线程 | 可持锁可不持 |
+
+#### wait 的详细过程
+
+```cpp
+std::unique_lock<std::mutex> lock(_queueMutex);
+while (_connectionQue.empty()) {
+    _cv.wait(lock);  // ① 释放锁 ② 阻塞睡觉 ③ 被唤醒 ④ 重新拿锁 ⑤ 返回
+}
+```
+
+**为什么 while 不是 if？** `wait` 可能被**虚假唤醒**（POSIX 允许操作系统无故唤醒线程）。if 只检查一次，被虚假唤醒后跳过检查继续执行，队列可能还是空的 → UB。while 醒后重新检查条件。
+
+#### 项目中条件变量的使用场景
+
+| 位置 | 代码 | 含义 |
+|------|------|------|
+| `getConnection()` 等连接 | `_cv.wait_for(lock, timeout)` | 队列空，睡等生产者/归还者通知 |
+| `getConnection()` 等前 | `_cv.notify_all()` | 告诉生产者"队列空了，快生产" |
+| `getConnection()` 归还删除器 | `_cv.notify_all()` | 归还了一条连接，通知等待者来取 |
+| `Producer` 省电 | `_cv.wait(lock)` | 队列非空，生产者睡等队列变空 |
+| `Producer` 生产完 | `_cv.notify_all()` | 新连接入队，通知消费者 |
+
+---
+
+### 6. std::atomic — 无锁原子变量
+
+```cpp
+#include <atomic>
+
+std::atomic_long _connectionCnt{0};
+std::atomic_long _totalBorrows{0};
+```
+
+| 操作 | 含义 |
+|------|------|
+| `_connectionCnt++` | 原子自增 |
+| `_connectionCnt--` | 原子自减 |
+| `_connectionCnt.load()` | 原子读取当前值 |
+| `_connectionCnt.store(5)` | 原子写入 |
+| `_totalWaitMs.fetch_add(ms)` | 原子加 ms，返回旧值 |
+
+**为什么不用普通 `int` + mutex？** atomic 是 CPU 硬件级别的原子指令，比 mutex 快数十倍。适用于**简单的增减计数**。
+
+**但原子不能替代 mutex！** 原子只管一个变量操作是原子的，管不了"检查队列空 + 取连接"这种多步事务。复合操作必须用 mutex。
+
+---
+
+### 7. 项目同步全景图
+
+```
+共享资源：_connectionQue (queue)、_connectionCnt (atomic)
+
+  消费者 getConnection()
+  ├── lock(_queueMutex)
+  ├── while (queue空) { notify_all(); wait_for(timeout); }
+  ├── 取队头
+  ├── unlock (unique_lock 析构自动)
+  └── 用完 → 自定义删除器
+            ├── lock
+            ├── push 回队列
+            ├── notify_all()
+            └── unlock
+
+  生产者 produceConnectionTask()
+  ├── lock
+  ├── while (queue非空) { wait(); }  // 有货就睡
+  ├── if (cnt < max) addConnection()
+  ├── notify_all()
+  └── unlock
+
+  扫描者 scannerConnectionTask()
+  ├── sleep(maxIdleTime秒)  // 不在锁内
+  ├── lock
+  ├── while (cnt > init && queue非空 && 队头超时)
+  │     { pop; delete; cnt--; }
+  └── unlock
+```
+
+---
+
+### 8. 关键原则总结
+
+| 原则 | 原因 |
+|------|------|
+| **永远用 lock_guard / unique_lock，不手动 lock/unlock** | 异常安全，忘记解锁=死锁 |
+| **条件变量配合 while，不是 if** | 防止虚假唤醒 |
+| **wait 前检查条件，wait 后复查条件** | 可能被 notify 但条件仍未满足 |
+| **锁内操作尽量轻量** | 锁是瓶颈，持锁做耗时操作会堵死所有线程 |
+| **atomic 只用于简单计数** | 复合操作用 mutex |
+| **notify 放在 unlock 前还是后都可以** | 都是正确的，放解锁后理论上稍高效 |
+
+
